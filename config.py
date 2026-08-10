@@ -27,7 +27,16 @@ USER_AGENT = "f1-race-control/0.1 (personal learning project)"
 # Both run locally in Ollama. Zero cost, no API key.
 OLLAMA_HOST = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"
+EMBED_DIM = 768
 LLM_MODEL = "qwen3:4b"
+
+# nomic-embed-text is trained with asymmetric task prefixes. Omitting them puts the
+# model off-distribution and measurably corrupts ranking: without these, two driving
+# offences scored LESS similar to each other (0.457) than one did to an unrelated pit
+# lane speed rule (0.524). With them, the ordering corrects (0.640 vs 0.541).
+# See docs/concepts/01-embeddings.md. Never embed raw text.
+EMBED_PREFIX_DOC = "search_document: "
+EMBED_PREFIX_QUERY = "search_query: "
 
 # --- Retrieval --------------------------------------------------------------
 TOP_K = 8            # passages handed to the model
