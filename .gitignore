@@ -1,0 +1,15 @@
+# Data: all of it is re-derivable from the FIA + FastF1, so none of it is committed.
+data/
+
+# Recorded live timing streams (F1 commercial data - never commit or redistribute)
+*.livetiming.txt
+recordings/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store
+.pytest_cache/
+.ipynb_checkpoints/

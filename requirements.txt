@@ -1,0 +1,20 @@
+# Data
+fastf1>=3.4          # F1 timing, laps, race control messages
+duckdb>=1.0          # embedded analytical store for decisions + race state
+pandas>=2.0
+
+# Corpus
+httpx>=0.27          # FIA document fetching
+pymupdf>=1.24        # PDF text extraction (imports as `fitz`)
+beautifulsoup4>=4.12 # parsing the FIA document index pages
+
+# Retrieval
+rank-bm25>=0.2.2     # lexical channel
+numpy>=1.26          # dense channel: flat exhaustive index
+
+# Serving
+fastapi>=0.110
+uvicorn>=0.27
+
+# Generation + embeddings run locally via Ollama over HTTP.
+# No SDK needed: httpx covers it. No API key, no paid service.
