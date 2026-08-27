@@ -68,9 +68,16 @@ DRIVER_RE = re.compile(r"^(\d+)\s*[-–]\s*(.+)$")
 # the International Sporting Code (driving standards live in Appendix L) and the
 # season's Formula One Sporting Regulations. Keeping them apart is what lets retrieval
 # jump from a decision to the right rulebook.
-ARTICLE_RE = re.compile(r"Article\s+(\d+(?:\.\d+)*)\s*([a-z]\))?", re.I)
+# The 2026 regulations renumbered every article with a Section B prefix - B1.8.6, B5.5.5
+# - so a pattern anchored on a leading digit silently lost almost every 2026 citation
+# (article extraction sat at 53% on infringements, against 82% for 2025 alone).
+#
+# Sub-letters arrive in three styles across the two seasons: "2 d)", "12.4.1e" and "2c".
+# The alternation covers all three, and stays case-sensitive on the letter: with re.I,
+# "Article 15 The Stewards..." captures "T" as a sub-article.
+ARTICLE_RE = re.compile(r"[Aa]rticle\s+(B?\d+(?:\.\d+)*)([a-z]\)?|\s+[a-z]\))?")
 APPENDIX_L_RE = re.compile(
-    r"Appendix\s+L,?\s+Chapter\s+([IVX]+),?\s+Article\s+(\d+(?:\.\d+)*)\s*([a-z]\))?", re.I
+    r"Appendix\s+L,?\s+Chapter\s+([IVX]+),?\s+Article\s+(\d+(?:\.\d+)*)\s*([a-z]\)?)?", re.I
 )
 
 SESSION_MAP = [
@@ -221,6 +228,16 @@ def extract_articles(text: str) -> list[dict]:
         if "appendix l" in head + " " + tail and "sporting regulations" not in tail[:60]:
             continue  # already captured, with its chapter, above
 
+        # A "B" prefix is definitional: Section B *is* the Sporting Regulations, so the
+        # number identifies its own rulebook without the citation naming one.
+        if art.startswith("B"):
+            aid = f"sporting:{art}{' ' + sub if sub else ''}"
+            if aid not in seen:
+                seen.add(aid)
+                found.append({"source": "sporting", "id": aid, "article": art,
+                              "sub": sub or None})
+            continue
+
         source, nearest = "unknown", len(tail) + 1
         for phrase, name in (
             ("technical regulations", "technical"),
@@ -330,7 +347,14 @@ def parse_one(doc, path) -> Decision:
     # Articles are cited in the Infringement line on decisions, but in the Reason on
     # summons documents, so search the union rather than one designated field.
     citation_text = " ".join(x for x in (d.infringement, d.fact, d.reason) if x)
-    d.articles = extract_articles(citation_text or text)
+    d.articles = extract_articles(citation_text) if citation_text else []
+    if not d.articles:
+        # The tabular documents - "Race Deleted Lap Times" and friends - put the incident
+        # in a table of cars and turns and cite the article elsewhere in the body, so the
+        # labelled fields come back empty of citations while the page is full of them.
+        # Boilerplate is stripped first, or every one of these would "cite" Article 15,
+        # which is only the right-of-appeal paragraph printed on every document.
+        d.articles = extract_articles(strip_boilerplate(text))
 
     # A summons alleges rather than sanctions, so a missing Decision is correct there,
     # not a parse failure.

@@ -44,6 +44,41 @@ pip install -r requirements.txt
 ollama pull nomic-embed-text
 ```
 
+On this machine the dependencies live in the Anaconda 3.12 install, which is `python`.
+`python3` is the Homebrew build and has none of them, so every command below uses
+`python`.
+
+## Building the corpus
+
+Each step is idempotent and safe to re-run; already-fetched PDFs and already-computed
+embeddings are skipped.
+
+```bash
+python -m corpus.fetch_fia manifest     # ~40 HTML requests -> 2,195 document records
+python -m corpus.fetch_fia download     # 868 substantive PDFs, fetched once each
+python -m corpus.fetch_regs             # 10 rulebook/guideline issues + version registry
+python -m corpus.parse_decisions        # -> decisions.jsonl, with per-field parse rates
+python -m corpus.parse_regs             # -> reg_chunks.jsonl  (--compare for the demo)
+python -m corpus.build_index            # embeddings + BM25 + DuckDB
+```
+
+Current corpus: **868 stewards' decisions** across 2025-2026 and **2,896 regulation
+chunks** spanning 8 issues of the Sporting Regulations, the Penalty Guidelines and the
+Driving Standards Guidelines - **3,764 passages** in total.
+
+## Querying
+
+```bash
+python -m corpus.query_cli "unsafe release in the pit lane"
+python -m corpus.query_cli "Article 33.3" -k 5
+python -m corpus.query_cli "B1.8.4b" --kind sporting --season 2026
+```
+
+Both retrieval channels are printed separately, unfused, because the way each one fails
+is the argument for Stage 3. `"Article 33.3"` is the case worth running: the dense
+channel confidently returns Article 13.3, third-party insurance, while BM25 returns the
+track-limits decisions. See [`docs/concepts/04-lexical-retrieval.md`](docs/concepts/04-lexical-retrieval.md).
+
 ## Data sources and licensing
 
 - **FIA decision documents, regulations and guidelines** - public PDFs from fia.com, fetched
