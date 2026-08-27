@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import httpx
 
 import config
+from corpus.fetch_fia import _get
 
 REGS_MANIFEST = config.INDEX / "regulations.jsonl"
 FIA = "https://www.fia.com"
@@ -85,15 +87,28 @@ def registry() -> list[Reg]:
     return regs
 
 
-def local_path(reg: Reg) -> "config.Path":  # type: ignore[name-defined]
-    from pathlib import Path
+def local_path(reg: Reg) -> Path:
     stem = f"{reg.season}_{reg.kind}_{reg.issue.replace(' ', '')}"
     return Path(config.PDFS) / f"{stem}.pdf"
 
 
 def fetch_all() -> list[Reg]:
+    """Fetch every issue, then write the manifest.
+
+    One document failing must not cost us the other eight. An earlier version raised out
+    of the loop on the first bad response, which skipped the manifest write entirely and
+    left the temporal registry non-existent even though seven PDFs were on disk. So each
+    document is attempted independently and the manifest is written regardless.
+
+    The manifest always carries the *full* registry, not just what downloaded, because
+    effective_to is derived by chaining consecutive issues: dropping a failed issue would
+    silently stretch its predecessor's date range over a period it never governed.
+    """
     regs = registry()
     headers = {"User-Agent": config.USER_AGENT}
+    fetched = skipped = 0
+    failures: list[tuple[Reg, str]] = []
+
     with httpx.Client(headers=headers, timeout=httpx.Timeout(read=180.0, connect=15.0,
                                                              write=30.0, pool=15.0),
                       follow_redirects=True) as client:
@@ -101,18 +116,31 @@ def fetch_all() -> list[Reg]:
             dest = local_path(r)
             if dest.exists() and dest.stat().st_size > 0:
                 print(f"  have  {dest.name}")
+                skipped += 1
                 continue
-            time.sleep(config.FETCH_DELAY_SECONDS)
-            resp = client.get(r.url)
-            resp.raise_for_status()
-            dest.write_bytes(resp.content)
-            print(f"  got   {dest.name}  ({len(resp.content) / 1024:.0f} KB)")
+            try:
+                time.sleep(config.FETCH_DELAY_SECONDS)
+                resp = _get(client, r.url)
+                dest.write_bytes(resp.content)
+                fetched += 1
+                print(f"  got   {dest.name}  ({len(resp.content) / 1024:.0f} KB)")
+            except Exception as e:  # noqa: BLE001 - one bad PDF must not kill the run
+                failures.append((r, f"{type(e).__name__}: {e}"))
+                print(f"  FAIL  {dest.name}  {type(e).__name__}: {e}")
 
     with REGS_MANIFEST.open("w") as f:
         for r in regs:
             f.write(json.dumps(asdict(r)) + "\n")
 
-    print(f"\n{len(regs)} regulation documents -> {REGS_MANIFEST}")
+    print(f"\nfetched={fetched} already-had={skipped} failed={len(failures)}")
+    print(f"{len(regs)} regulation documents -> {REGS_MANIFEST}")
+
+    if failures:
+        # Loud, because a missing issue is a hole in the temporal index rather than a
+        # missing row: in_force() will resolve dates to an issue we cannot read.
+        print("\n!! MISSING PDFs - re-run to retry:")
+        for r, err in failures:
+            print(f"   {r.season} {r.kind} {r.issue}: {err}")
     print("\nversions in force:")
     for r in sorted(regs, key=lambda r: (r.season, r.kind, r.effective_from)):
         until = r.effective_to or "current"
