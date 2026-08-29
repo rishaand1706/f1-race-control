@@ -79,6 +79,26 @@ is the argument for Stage 3. `"Article 33.3"` is the case worth running: the den
 channel confidently returns Article 13.3, third-party insurance, while BM25 returns the
 track-limits decisions. See [`docs/concepts/04-lexical-retrieval.md`](docs/concepts/04-lexical-retrieval.md).
 
+## Replaying a session
+
+A finished session, re-emitted as a live event stream at a chosen speed. Same `Event` type
+live mode will produce in Stage 6, so everything downstream is written once.
+
+```bash
+python -m ingest.replay --round 12 --speed 900              # paced against a wall clock
+python -m ingest.replay --round 12 --speed 0 --only race_control
+python -m ingest.replay --round 12 --from-lap 40 --max 30
+python -m ingest.replay --round 12 --verify-clock
+python -m pytest tests/test_replay.py -q
+```
+
+The two feeds inside one session disagree on time by **three and a half minutes**, because
+race control messages are absolute UTC while lap data is a timedelta on a session timeline
+whose origin is only implied. The offset is measured from events appearing in both feeds,
+and verified against timestamps race control prints inside its own messages: **111 of them
+in the Dutch GP, all within one second**. It is not a constant, either - 208.4s at Zandvoort,
+197.2s at the Red Bull Ring. See [`docs/concepts/05-event-streams.md`](docs/concepts/05-event-streams.md).
+
 ## Data sources and licensing
 
 - **FIA decision documents, regulations and guidelines** - public PDFs from fia.com, fetched
