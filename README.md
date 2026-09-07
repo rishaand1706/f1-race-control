@@ -99,6 +99,53 @@ and verified against timestamps race control prints inside its own messages: **1
 in the Dutch GP, all within one second**. It is not a constant, either - 208.4s at Zandvoort,
 197.2s at the Red Bull Ring. See [`docs/concepts/05-event-streams.md`](docs/concepts/05-event-streams.md).
 
+## Explaining an incident
+
+The stage that turns retrieval into a card. Classify the message into facets, enrich it
+with live race state, run one filtered search per slot the card has, then ground a local
+model on those passages and bind every citation it writes.
+
+```bash
+python -m engine.detect --round 12                 # message -> facets, and the traffic breakdown
+python -m engine.retrieve "unsafe release in the pit lane"
+python -m engine.retrieve --demo                   # the two failures this stage fixes
+python -m engine.retrieve --check --sample 120     # article-match against real decisions
+python -m engine.explain --round 12 --max 5        # full cards, needs Ollama
+python -m pytest tests/test_engine.py -q
+```
+
+**Retrieval is three searches, not one.** 110 penalty-guideline entries cannot compete
+with 2,776 regulation chunks in a single top-k; they get crowded out by volume regardless
+of relevance. Each search pre-filters on metadata, then fuses BM25 and dense results with
+reciprocal rank fusion at `K=10` rather than the literature's 60, which flattens two
+strong channels into consensus mediocrity.
+
+Measured with `--check` over **120 real decisions**, given only the stewards' own
+description of the incident:
+
+| | hybrid + filtered | dense only, unfiltered |
+|---|---|---|
+| hit@1 | **49.2%** | 8.3% |
+| hit@3 | **58.3%** | 21.7% |
+| hit@5 | **64.2%** | 25.8% |
+
+Not held out - it draws from the same pool Stage 5 evaluates on, so it is a sanity check
+on plumbing rather than a result. The 36% miss at k=5 is mostly a corpus gap, not a
+ranking one: 532 of the articles stewards cite are in the International Sporting Code and
+its Appendix L, which are not in the corpus at all.
+
+Two things measured here came out against the design and are recorded that way. Asking
+Ollama for `think: False` does not stop qwen3 reasoning, it only removes the `<think>`
+tags - so the reasoning arrived untagged inside the answer and the regex written to strip
+it had nothing to match. And the situation cache returns an **11% hit rate** over 542 real
+messages, not the burst-heavy traffic assumed, because the cache key contains car numbers
+and the expensive half of the work is precisely the car-specific half. Both are written up
+in [`docs/concepts/07-grounding-and-citations.md`](docs/concepts/07-grounding-and-citations.md).
+
+Cards are correct but slow: retrieval runs 0.4-1.5s, generation 43-114s, because ~92% of
+the generated tokens are reasoning that gets discarded. That is Stage 4's problem, now with
+numbers attached.
+
 ## Data sources and licensing
 
 - **FIA decision documents, regulations and guidelines** - public PDFs from fia.com, fetched
