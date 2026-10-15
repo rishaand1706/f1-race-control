@@ -34,9 +34,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -161,6 +163,11 @@ def generate(prompt: str, timeout: float = 300.0) -> str:
 
     `/no_think` in the prompt was measured too, and is a no-op here: 285 tokens against
     275 for a thinking run of the same trivial prompt.
+
+    Re-measured on Ollama 0.34.2 in Stage 4, on real card prompts: unchanged. think=False
+    produced 1,155 and 1,320 tokens that opened "Okay, the user wants me to explain...".
+    The browser avoids the question entirely by using a model with no reasoning phase
+    (config.CARD_MODEL).
     """
     with httpx.Client(timeout=timeout) as client:
         r = client.post(
@@ -193,11 +200,52 @@ def generate(prompt: str, timeout: float = 300.0) -> str:
         return text
 
 
-def bind_citations(text: str, sources: list[Hit]) -> tuple[str, list[Hit], list[int]]:
+def _tidy(text: str) -> str:
+    """Close up the gaps a deleted marker leaves: "claim [7]." -> "claim."."""
+    text = re.sub(r" +([.,;])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text)
+
+
+async def astream(prompt: str, model: str, think: bool | None,
+                  client: httpx.AsyncClient) -> AsyncIterator[tuple[str, Any]]:
+    """`generate`, streamed: ("thinking", text) and ("answer", text) as they arrive,
+    then ("done", Ollama's final stats).
+
+    Streaming does not make a card faster. It moves the first visible word from the end
+    of generation to the start of it, which is the only latency a viewer can perceive.
+    Reasoning is surfaced as its own kind so the UI can say "reasoning" instead of
+    showing nothing, and so it can never leak into the answer the way it did in Stage 3.
+    """
+    body: dict[str, Any] = {
+        "model": model, "prompt": prompt, "stream": True,
+        "keep_alive": config.OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0.2, "num_predict": config.NUM_PREDICT},
+    }
+    if think is not None:
+        body["think"] = think
+    async with client.stream("POST", f"{config.OLLAMA_HOST}/api/generate", json=body) as r:
+        r.raise_for_status()
+        async for line in r.aiter_lines():
+            if not line:
+                continue
+            chunk = json.loads(line)
+            if chunk.get("thinking"):
+                yield "thinking", chunk["thinking"]
+            if chunk.get("response"):
+                yield "answer", chunk["response"]
+            if chunk.get("done"):
+                yield "done", chunk
+                return
+
+
+def bind_citations(text: str, sources: list[Hit],
+                   renumber: bool = True) -> tuple[str, list[Hit], list[int]]:
     """Resolve [n] markers to real sources; delete the ones that point nowhere.
 
     Renumbered to the order they are actually used, so the card's footnotes read 1, 2, 3
-    rather than exposing retrieval's internal ordering.
+    rather than exposing retrieval's internal ordering. The browser passes renumber=False:
+    it shows the sources before the prose exists, so their numbers are already on screen
+    and renumbering would change them under the reader's eyes.
     """
     used: list[int] = []
     dropped: list[int] = []
@@ -210,16 +258,71 @@ def bind_citations(text: str, sources: list[Hit]) -> tuple[str, list[Hit], list[
         elif n not in dropped:
             dropped.append(n)
 
-    renumber = {old: new for new, old in enumerate(used, 1)}
+    new_n = {old: (new if renumber else old) for new, old in enumerate(used, 1)}
 
     def sub(m: re.Match) -> str:
         n = int(m.group(1))
-        return f"[{renumber[n]}]" if n in renumber else ""
+        return f"[{new_n[n]}]" if n in new_n else ""
 
-    cleaned = CITE_RE.sub(sub, text)
-    cleaned = re.sub(r" +([.,;])", r"\1", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    cleaned = _tidy(CITE_RE.sub(sub, text)).strip()
     return cleaned, [sources[n - 1] for n in used], dropped
+
+
+class StreamBinder:
+    """bind_citations for text that arrives a few characters at a time.
+
+    Streaming breaks the batch binder in two ways. A marker can be split across chunks -
+    "[" in one, "3]" in the next - so a chunk ending in "[" or "[1" cannot be judged yet
+    and is held back. And deleting an invented marker has to close up the space before
+    it, which may already have been sent. So trailing whitespace is held back too, until
+    the next visible character shows whether it survives.
+
+    The contract, tested over every split point: joining everything `feed` and `flush`
+    return equals `bind_citations(text, sources, renumber=False)[0]` on the whole text.
+    It does not renumber, because renumbering needs the whole answer.
+    """
+
+    PARTIAL = re.compile(r"\[\d*$")
+
+    def __init__(self, n_sources: int) -> None:
+        self.n = n_sources
+        self.raw = ""          # unresolved tail: a marker that may still be opening
+        self.space = ""        # resolved trailing whitespace, not yet safe to emit
+        self.started = False   # leading whitespace is dropped, as .strip() would
+        self.used: list[int] = []
+        self.dropped: list[int] = []
+
+    def _resolve(self, text: str) -> str:
+        def sub(m: re.Match) -> str:
+            n = int(m.group(1))
+            if 1 <= n <= self.n:
+                if n not in self.used:
+                    self.used.append(n)
+                return m.group(0)
+            if n not in self.dropped:
+                self.dropped.append(n)
+            return ""
+        return CITE_RE.sub(sub, text)
+
+    def _emit(self, ready: str, final: bool) -> str:
+        out = _tidy(self.space + self._resolve(ready))
+        body = out.rstrip()
+        self.space = "" if final else out[len(body):]
+        if not self.started:
+            body = body.lstrip()
+            self.started = bool(body)
+        return body
+
+    def feed(self, chunk: str) -> str:
+        self.raw += chunk
+        m = self.PARTIAL.search(self.raw)
+        cut = m.start() if m else len(self.raw)
+        ready, self.raw = self.raw[:cut], self.raw[cut:]
+        return self._emit(ready, final=False)
+
+    def flush(self) -> str:
+        ready, self.raw = self.raw, ""
+        return self._emit(ready, final=True)
 
 
 class Explainer:
@@ -285,11 +388,13 @@ class Explainer:
 
 
 def main() -> None:
+    import pandas as pd
+
     from engine.detect import classify
     from engine.state import RaceState
     from engine import query as qmod
     from ingest.events import RACE_CONTROL
-    from ingest.replay import build_events, load_session
+    from ingest.replay import build_events, load_session, local_start
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--year", type=int, default=2026)
@@ -302,6 +407,7 @@ def main() -> None:
     session = load_session(args.year, args.round, args.session)
     events = build_events(session)
     date_iso = str(session.date.date())
+    t0_local = local_start(session)
 
     state = RaceState()
     explainer = Explainer(k=args.k)
@@ -315,7 +421,8 @@ def main() -> None:
         facets = classify(e["message"], lap=e.lap, car=e["car"])
         if not facets.explainable or facets.stage == "track_condition":
             continue
-        q = qmod.build(facets, state=state, season=args.year, date_iso=date_iso)
+        asof = (t0_local + pd.Timedelta(seconds=e.t)).strftime("%Y-%m-%dT%H:%M")
+        q = qmod.build(facets, state=state, season=args.year, date_iso=date_iso, asof=asof)
         print(explainer.explain(q).render())
         print()
         made += 1

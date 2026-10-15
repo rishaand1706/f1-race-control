@@ -32,6 +32,13 @@ class Query:
     terms: str                      # the lexical query
     context: dict = field(default_factory=dict)
     reg_issue: str | None = None    # the Sporting Regulations issue in force that day
+    # Circuit-local time the message was issued, 'YYYY-MM-DDTHH:MM'. Precedent search
+    # only sees decisions published before it. Unknown -> the start of that day, which
+    # errs towards hiding a same-day precedent rather than leaking a later one.
+    asof: str = ""
+
+    def __post_init__(self) -> None:
+        self.asof = self.asof or f"{self.date_iso}T00:00"
 
     @property
     def signature(self) -> str:
@@ -56,7 +63,7 @@ def _car_phrase(car: dict) -> str:
 
 
 def build(facets: Facets, state=None, season: int = 2026,
-          date_iso: str = "2026-01-01") -> Query:
+          date_iso: str = "2026-01-01", asof: str = "") -> Query:
     """Compose the query. `state` is a RaceState, or None when replaying without one."""
     offence = facets.offence or "race control incident"
 
@@ -102,5 +109,5 @@ def build(facets: Facets, state=None, season: int = 2026,
     return Query(
         facets=facets, season=season, date_iso=date_iso,
         text=text, terms=" ".join(terms),
-        context=context, reg_issue=reg.issue if reg else None,
+        context=context, reg_issue=reg.issue if reg else None, asof=asof,
     )

@@ -126,14 +126,19 @@ def test_no_citations_is_not_an_error():
 class FakeRetriever(Retriever):
     """Rows only. Bypasses __init__ so no index or DuckDB is touched."""
 
-    # pid, kind, season, ref, article, title, text, effective_from, effective_to, url
+    # pid, kind, season, ref, article, title, text, effective_from, effective_to, url,
+    # published
     ROWS = [
-        (0, "sporting", 2025, "2025 Issue 4", "33.3", "t", "x", "2025-01-01", "2025-07-01", None),
-        (1, "sporting", 2025, "2025 Issue 5", "33.3", "t", "x", "2025-07-01", None, None),
-        (2, "sporting", 2026, "2026 Issue 8", "B1.8.4", "t", "x", "2026-01-01", None, None),
-        (3, "penalty_guidelines", 2026, "PG", None, "t", "x", None, None, None),
-        (4, "driving_standards", 2026, "DSG", None, "t", "x", None, None, None),
-        (5, "decision", 2025, "Doc 12", None, "t", "x", None, None, None),
+        (0, "sporting", 2025, "2025 Issue 4", "33.3", "t", "x", "2025-01-01", "2025-07-01", None, None),
+        (1, "sporting", 2025, "2025 Issue 5", "33.3", "t", "x", "2025-07-01", None, None, None),
+        (2, "sporting", 2026, "2026 Issue 8", "B1.8.4", "t", "x", "2026-01-01", None, None, None),
+        (3, "penalty_guidelines", 2026, "PG", None, "t", "x", None, None, None, None),
+        (4, "driving_standards", 2026, "DSG", None, "t", "x", None, None, None, None),
+        (5, "decision", 2025, "Doc 12", None, "t", "x", None, None, None, "2025-06-01T18:00"),
+        # Race day, 2026-07-05: one ruling from qualifying, one on the race incident itself.
+        (6, "decision", 2026, "Doc 40", None, "t", "x", None, None, None, "2026-07-04T17:10"),
+        (7, "decision", 2026, "Doc 71", None, "t", "x", None, None, None, "2026-07-05T16:32"),
+        (8, "decision", 2026, "Doc 99", None, "t", "x", None, None, None, None),
     ]
 
     def __init__(self):
@@ -141,8 +146,9 @@ class FakeRetriever(Retriever):
 
 
 class FakeQuery:
-    def __init__(self, season, date_iso):
+    def __init__(self, season, date_iso, asof=""):
         self.season, self.date_iso = season, date_iso
+        self.asof = asof or f"{date_iso}T00:00"
 
 
 @pytest.fixture
@@ -168,7 +174,24 @@ def test_guideline_slot_spans_both_guideline_kinds(r):
 
 def test_precedent_slot_is_decisions_only_and_crosses_seasons(r):
     """Precedent is the one slot where an older season is the point, not a bug."""
-    assert r._candidates(PRECEDENT, FakeQuery(2026, "2026-08-01")) == [5]
+    assert r._candidates(PRECEDENT, FakeQuery(2026, "2026-08-01")) == [5, 6, 7]
+
+
+def test_a_ruling_published_after_the_message_is_not_a_precedent(r):
+    """The leak Stage 4's replay exposed. At 15:04 the incident is only noted; the ruling
+    on it (Doc 71) is published at 16:32. Before this filter, the card for the 15:04
+    message retrieved Doc 71 and announced the penalty an hour and a half early."""
+    during = r._candidates(PRECEDENT, FakeQuery(2026, "2026-07-05", "2026-07-05T15:04"))
+    after = r._candidates(PRECEDENT, FakeQuery(2026, "2026-07-05", "2026-07-05T17:00"))
+    assert 7 not in during
+    assert 6 in during, "an earlier ruling from the same weekend is a legitimate precedent"
+    assert 7 in after
+
+
+def test_unknown_message_time_hides_the_whole_day_and_undated_rulings(r):
+    """No time of day: err towards hiding a same-day precedent, never towards leaking."""
+    got = r._candidates(PRECEDENT, FakeQuery(2026, "2026-07-05"))
+    assert got == [5, 6]
 
 
 def test_empty_candidate_set_ranks_to_nothing_rather_than_raising(r):

@@ -18,11 +18,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import statistics
 import sys
 import time
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 import fastf1
 import pandas as pd
@@ -43,13 +44,46 @@ CLOCK_ANCHORS = [
 ]
 
 
-def load_session(year: int, rnd: int, name: str = "R"):
+def load_session(year: int, rnd: int, name: str = "R", offline: bool = False):
+    """`offline=True` reads the cache and never touches the network.
+
+    A cached session still makes FastF1 ask the Ergast mirror for results and lap 1, and
+    when that host is slow each request waits out a 5-second timeout before falling back
+    to the cache it had all along. Fine for a script; not for a server where someone
+    clicked a race and is watching a spinner.
+    """
     fastf1.Cache.enable_cache(str(config.CACHE))
+    fastf1.Cache.offline_mode(offline)
     s = fastf1.get_session(year, rnd, name)
     # Telemetry is deliberately not loaded: it is gigabytes per season and nothing here
     # needs it. Lap and message data is a few MB.
     s.load(laps=True, telemetry=False, weather=False, messages=True)
     return s
+
+
+# What a race needs on disk to replay offline.
+RACE_FILES = ("race_control_messages.ff1pkl", "_extended_timing_data.ff1pkl",
+              "track_status_data.ff1pkl", "session_status_data.ff1pkl")
+
+
+def cached_races(year: int = 2026) -> list[dict]:
+    """Races whose data is already in the local cache, from the schedule, offline.
+
+    "Cached" means the race's files are on disk, not that its folder exists: FastF1
+    creates the folder before it fetches, so a race looked up before it was run leaves
+    an empty one behind (the 2026 Spanish GP did), and loading it offline fails.
+    """
+    fastf1.Cache.enable_cache(str(config.CACHE))
+    fastf1.Cache.offline_mode(True)
+    sched = fastf1.get_event_schedule(year, include_testing=False)
+    cached = {race.parent.name for race in (config.CACHE / str(year)).glob("*/*_Race")
+              if all((race / f).exists() for f in RACE_FILES)}
+    out = []
+    for _, ev in sched.iterrows():
+        if f"{ev['EventDate'].date()}_{ev['EventName'].replace(' ', '_')}" in cached:
+            out.append({"round": int(ev["RoundNumber"]), "name": ev["EventName"],
+                        "location": ev["Location"], "date": str(ev["EventDate"].date())})
+    return out
 
 
 def clock_skew(session) -> float:
@@ -110,6 +144,18 @@ def local_utc_offset(session) -> float:
     return (loc - utc).total_seconds()
 
 
+def local_start(session) -> pd.Timestamp:
+    """Circuit-local wall time at t=0. An event's local time is this plus `e.t` seconds.
+
+    The same arithmetic `verify_clock` checks against the FIA's own printed timestamps,
+    so anything that needs "when, in local time, was this message issued" gets the
+    verified answer rather than a second derivation of it.
+    """
+    return (session.date
+            + pd.Timedelta(seconds=clock_skew(session))
+            + pd.Timedelta(seconds=local_utc_offset(session)))
+
+
 def verify_clock(session, events: list[Event]) -> None:
     """Check the reconstructed race clock against ground truth inside the messages.
 
@@ -123,9 +169,7 @@ def verify_clock(session, events: list[Event]) -> None:
     the FIA truncating its stamp to whole seconds - so the alignment is exact and we read
     half a second late on average, not drifting.
     """
-    start_local = (session.date
-                   + pd.Timedelta(seconds=clock_skew(session))
-                   + pd.Timedelta(seconds=local_utc_offset(session)))
+    start_local = local_start(session)
     base = (start_local.hour * 3600 + start_local.minute * 60
             + start_local.second + start_local.microsecond / 1e6)
 
@@ -234,10 +278,38 @@ def replay(events: list[Event], speed: float = 20.0) -> Iterator[Event]:
     wall_start = time.monotonic()
     for e in events:
         if speed > 0:
-            delay = (e.t - t_start) / speed - (time.monotonic() - wall_start)
+            delay = _due(e, t_start, wall_start, speed)
             if delay > 0:
                 time.sleep(delay)
         yield e
+
+
+def _due(e: Event, t_start: float, wall_start: float, speed: float) -> float:
+    """Seconds until `e` is due. Negative means it is already late by that much."""
+    return (e.t - t_start) / speed - (time.monotonic() - wall_start)
+
+
+async def areplay(events: list[Event], speed: float = 20.0) -> AsyncIterator[tuple[Event, float]]:
+    """`replay` for an event loop: the same schedule, awaited instead of slept.
+
+    The server runs a replay alongside every connected browser and the card workers, so
+    a `time.sleep` here would freeze all of them. Also yields how late each event is, in
+    wall seconds, because a replay that is falling behind is the first visible symptom of
+    anything downstream blocking the loop.
+    """
+    if not events:
+        return
+    t_start = events[0].t
+    wall_start = time.monotonic()
+    for e in events:
+        late = 0.0
+        if speed > 0:
+            delay = _due(e, t_start, wall_start, speed)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                late = -delay
+        yield e, late
 
 
 def main() -> None:

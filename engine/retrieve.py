@@ -20,6 +20,7 @@ without ever comparing their scores, which is the only honest way to do it.
 Usage:
     python -m engine.retrieve "causing a collision at turn 4"
     python -m engine.retrieve --demo        # the two failures this stage exists to fix
+    python -m engine.retrieve --leak        # precedents from the future, before Stage 4
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ class Retriever:
         con = duckdb.connect(str(config.DB), read_only=True)
         self.rows = con.execute("""
             SELECT pid, kind, season, ref, article, title, text,
-                   effective_from, effective_to, url
+                   effective_from, effective_to, url, published
             FROM passages ORDER BY pid
         """).fetchall()
         con.close()
@@ -107,6 +108,12 @@ class Retriever:
                     continue
             elif slot == PRECEDENT:
                 if kind != "decision":
+                    continue
+                # A precedent has to exist before the message it explains. Without this,
+                # replaying a race retrieves the stewards' ruling on the very incident
+                # being explained, and the card announces a penalty nobody has given yet.
+                published = r[10]
+                if not published or published >= q.asof:
                     continue
             out.append(i)
         return out
@@ -305,6 +312,67 @@ def check(sample: int = 60, k: int = 5, seed: int = 0) -> None:
     print("\nNot held out - same pool Stage 5 evaluates on. A sanity check, not a result.")
 
 
+def leak(k: int = 2) -> None:
+    """How often precedent search handed the model a ruling from the future.
+
+    Replays every cached race, and for each card-worthy message ranks precedents the way
+    Stage 3 did - every decision in the corpus - then asks whether any of the top k was
+    published after the message was issued. Most of those are not merely later: they are
+    the stewards' ruling on the very incident being explained, so the card "predicts" a
+    penalty by reading the verdict. The time filter in `_candidates` makes the post-fix
+    count zero by construction; this measures what it was.
+    """
+    import logging
+
+    import pandas as pd
+
+    from engine import query as qmod
+    from engine.detect import TRACK_CONDITION, classify
+    from engine.state import RaceState
+    from ingest.events import RACE_CONTROL
+    from ingest.replay import build_events, cached_races, load_session, local_start
+
+    logging.getLogger("fastf1").setLevel(logging.ERROR)
+    r = Retriever()
+    published = {row[0]: row[10] for row in r.rows}
+    every_decision = [i for i, row in enumerate(r.rows) if row[1] == "decision"]
+
+    n = future = same_event = 0
+    examples = []
+    for race in cached_races():
+        session = load_session(2026, race["round"], "R", offline=True)
+        t0 = local_start(session)
+        date_iso = str(session.date.date())
+        state = RaceState()
+        for e in build_events(session):
+            state.apply(e)
+            if e.kind != RACE_CONTROL:
+                continue
+            f = classify(e["message"], lap=e.lap, car=e["car"])
+            if not f.explainable or f.stage == TRACK_CONDITION:
+                continue
+            asof = (t0 + pd.Timedelta(seconds=e.t)).strftime("%Y-%m-%dT%H:%M")
+            q = qmod.build(f, state=state, season=2026, date_iso=date_iso, asof=asof)
+            hits = r._rank(every_decision, q.text, q.terms, k)
+            late = [h for h in hits if (published[h.pid] or "9999") >= asof]
+            n += 1
+            if late:
+                future += 1
+                if any(h.ref.startswith(f"2026 {race['name']}") for h in late):
+                    same_event += 1
+                    if len(examples) < 4:
+                        examples.append((asof, f.raw, late[0].ref, published[late[0].pid]))
+        print(f"  {race['name']:<24} running total: {future}/{n} leaked")
+
+    print(f"\n{n} card-worthy messages across {len(cached_races())} races, top-{k} precedents")
+    print(f"  a precedent published after the message:  {future} ({100 * future / n:.0f}%)")
+    print(f"  ...and from the same race weekend:        {same_event} ({100 * same_event / n:.0f}%)")
+    print("\nexamples:")
+    for asof, msg, ref, pub in examples:
+        print(f"  {asof}  {msg[:70]}")
+        print(f"      -> {ref}, published {pub}")
+
+
 def _date_iso(doc_date: str | None, season: int) -> str:
     """'20 September 2025' -> '2025-09-20'. Falls back to mid-season."""
     from datetime import datetime
@@ -325,7 +393,13 @@ def main() -> None:
     p.add_argument("--demo", action="store_true")
     p.add_argument("--check", action="store_true", help="article-match against real decisions")
     p.add_argument("--sample", type=int, default=60)
+    p.add_argument("--leak", action="store_true",
+                   help="how often precedent search retrieved a ruling from the future")
     args = p.parse_args()
+
+    if args.leak:
+        leak()
+        return
 
     if args.demo:
         demo()

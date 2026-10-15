@@ -73,6 +73,7 @@ def _decision_passage(r: dict) -> dict:
     ]
     ref = f"{r['season']} {r['event'].replace('_', ' ').title()}, Doc {r['doc_number']}"
     return {
+        "published": _published(r),
         "kind": "decision",
         "season": r["season"],
         "event": r["event"],
@@ -89,6 +90,22 @@ def _decision_passage(r: dict) -> dict:
         "url": r["url"],
         "text": "\n".join(p for p in parts if p),
     }
+
+
+def _published(r: dict) -> str | None:
+    """'05 July 2026' + '17:32' -> '2026-07-05T17:32', circuit local time.
+
+    When the decision became public, and so the earliest moment it can be anybody's
+    precedent. Without it, replaying a race retrieves the stewards' ruling on the very
+    incident being explained - published an hour after the message it now "predicts".
+    """
+    from datetime import datetime
+    try:
+        day = datetime.strptime(str(r["doc_date"]).strip(), "%d %B %Y")
+    except (TypeError, ValueError):
+        return None
+    hhmm = str(r.get("doc_time") or "").strip()
+    return f"{day:%Y-%m-%d}T{hhmm}" if re.fullmatch(r"\d{2}:\d{2}", hhmm) else f"{day:%Y-%m-%d}T23:59"
 
 
 def _reg_passage(c: dict) -> dict:
@@ -195,15 +212,15 @@ def build(rebuild: bool = False) -> None:
             article TEXT, title TEXT, ref TEXT,
             effective_from TEXT, effective_to TEXT,
             doc_type TEXT, car INTEGER, session TEXT, penalty_type TEXT,
-            articles_cited TEXT, url TEXT, text TEXT
+            articles_cited TEXT, url TEXT, text TEXT, published TEXT
         )
     """)
     cols = ["pid", "kind", "season", "event", "article", "title", "ref",
             "effective_from", "effective_to", "doc_type", "car", "session",
-            "penalty_type", "articles_cited", "url", "text"]
+            "penalty_type", "articles_cited", "url", "text", "published"]
     con.executemany(
         f"INSERT INTO passages ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-        [[p[c] for c in cols] for p in passages],
+        [[p.get(c) for c in cols] for p in passages],
     )
 
     # The full decision rows are kept alongside, because Stage 5's evaluation needs the

@@ -64,3 +64,32 @@ TOP_K = 8            # passages handed to the model
 # is the same data Stage 5 evaluates on, so it is a sanity check, not an evaluation.
 # Stage 5 settles this on a held-out golden set.
 RRF_K = 10
+
+# --- Serving (Stage 4) ------------------------------------------------------
+# The model that writes cards in the browser: qwen3's own non-reasoning release, same
+# family and size as LLM_MODEL. Measured on the same 8 real card prompts from 4 races,
+# streamed, model load excluded:
+#
+#                          first answer word    card done     tokens   uncited sentences
+#     qwen3:4b-instruct    4.8s  (4.2-7.4)       8.9s          106      0 of 24
+#     qwen3:4b, think      29.2s (22.2-93.3)     33.0s (-101)  716      3 of 25
+#
+# Reading all sixteen answers against their sources, faithfulness was a wash: both
+# speculated on the same prompt, each mis-attributed one citation. So the thinking model
+# buys nothing measurable for 6x the latency. Eight prompts is a sample, not an
+# evaluation; Stage 5's faithfulness judge is what settles it. LLM_MODEL stays as the
+# terminal CLI's model so Stage 3's numbers remain reproducible.
+#
+# CARD_THINK=None sends no think flag at all: the instruct model has no reasoning phase to
+# route, and Stage 3 showed what think=False does to a model that does.
+CARD_MODEL = "qwen3:4b-instruct"
+CARD_THINK: bool | None = None
+
+# Ollama unloads a model after 5 idle minutes, and reloading measured 3.6-5.4s. A race has
+# quiet stretches far longer than that, so without this the first card after each one
+# pays a reload on top of everything else. The server also loads the model at startup.
+OLLAMA_KEEP_ALIVE = "30m"
+
+# Race seconds after which an incident is too old to be worth the model's time. See
+# server/scheduler.py and the simulation behind it.
+PROSE_MAX_AGE = 120.0
