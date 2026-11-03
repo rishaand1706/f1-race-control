@@ -7,11 +7,12 @@ the effective_from/effective_to window, car, penalty type).
 
 Two channels are built over the same passages:
 
-    dense   nomic-embed-text vectors, L2-normalised, stored as a flat (n, 768) matrix
+    dense   nomic-embed-text vectors, L2-normalised, stored in each passage's own row
+            as FLOAT[768] and scored in SQL (docs/concepts/10-vector-store.md)
     lexical BM25 over a tokeniser that keeps "33.4" and "b1.1.3" as single tokens
 
 At a few thousand passages a flat exhaustive dense index is the right answer, not a
-concession. One matrix multiply scores the whole corpus in single-digit milliseconds.
+concession. One scan scores the whole corpus in milliseconds.
 HNSW and IVF buy sublinear search at the cost of recall and build complexity, and both
 only start paying at a scale we are two or three orders of magnitude below.
 
@@ -40,7 +41,6 @@ from corpus.parse_decisions import DECISIONS
 from corpus.parse_regs import REG_CHUNKS
 from engine.embed import embed_documents
 
-VECTORS = config.INDEX / "vectors.npy"
 BM25_PKL = config.INDEX / "bm25.pkl"
 EMBED_CACHE_VEC = config.INDEX / "embed_cache.npy"
 EMBED_CACHE_KEYS = config.INDEX / "embed_cache_keys.json"
@@ -193,8 +193,7 @@ def build(rebuild: bool = False) -> None:
 
     print("dense channel:")
     vectors = embed_with_cache([p["text"] for p in passages], rebuild=rebuild)
-    np.save(VECTORS, vectors)
-    print(f"  vectors {vectors.shape} -> {VECTORS.name}")
+    print(f"  vectors {vectors.shape} -> passages.embedding")
 
     print("\nlexical channel:")
     corpus_tokens = [tokenize(p["text"]) for p in passages]
@@ -206,21 +205,25 @@ def build(rebuild: bool = False) -> None:
     print("\nstore:")
     con = duckdb.connect(str(config.DB))
     con.execute("DROP TABLE IF EXISTS passages")
-    con.execute("""
+    con.execute(f"""
         CREATE TABLE passages (
             pid INTEGER PRIMARY KEY, kind TEXT, season INTEGER, event TEXT,
             article TEXT, title TEXT, ref TEXT,
             effective_from TEXT, effective_to TEXT,
             doc_type TEXT, car INTEGER, session TEXT, penalty_type TEXT,
-            articles_cited TEXT, url TEXT, text TEXT, published TEXT
+            articles_cited TEXT, url TEXT, text TEXT, published TEXT,
+            embedding FLOAT[{config.EMBED_DIM}]
         )
     """)
     cols = ["pid", "kind", "season", "event", "article", "title", "ref",
             "effective_from", "effective_to", "doc_type", "car", "session",
             "penalty_type", "articles_cited", "url", "text", "published"]
+    # The vector goes in the same row as the text it was computed from. A separate file
+    # paired with this table by position is a foreign key that nothing enforces.
     con.executemany(
-        f"INSERT INTO passages ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-        [[p.get(c) for c in cols] for p in passages],
+        f"INSERT INTO passages ({','.join(cols)}, embedding) "
+        f"VALUES ({','.join('?' * (len(cols) + 1))})",
+        [[p.get(c) for c in cols] + [v.tolist()] for p, v in zip(passages, vectors)],
     )
 
     # The full decision rows are kept alongside, because Stage 5's evaluation needs the

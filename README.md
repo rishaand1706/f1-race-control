@@ -59,12 +59,17 @@ python -m corpus.fetch_fia download     # 868 substantive PDFs, fetched once eac
 python -m corpus.fetch_regs             # 10 rulebook/guideline issues + version registry
 python -m corpus.parse_decisions        # -> decisions.jsonl, with per-field parse rates
 python -m corpus.parse_regs             # -> reg_chunks.jsonl  (--compare for the demo)
-python -m corpus.build_index            # embeddings + BM25 + DuckDB
+python -m corpus.build_index            # passages + embeddings in DuckDB, BM25 alongside
 ```
 
 Current corpus: **868 stewards' decisions** across 2025-2026 and **2,896 regulation
 chunks** spanning 8 issues of the Sporting Regulations, the Penalty Guidelines and the
 Driving Standards Guidelines - **3,764 passages** in total.
+
+DuckDB is the vector store: each passage's text, metadata and 768-dimensional embedding
+sit in one row, and dense search is a SQL query over them. Why that replaced a NumPy
+matrix kept beside the table is in
+[`docs/concepts/10-vector-store.md`](docs/concepts/10-vector-store.md).
 
 ## Querying
 

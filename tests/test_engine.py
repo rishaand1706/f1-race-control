@@ -196,3 +196,50 @@ def test_unknown_message_time_hides_the_whole_day_and_undated_rulings(r):
 
 def test_empty_candidate_set_ranks_to_nothing_rather_than_raising(r):
     assert r._rank([], "anything", "anything", 3) == []
+
+
+# --- the vector store -------------------------------------------------------
+
+def test_dense_channel_returns_the_passage_whose_vector_matched(tmp_path, monkeypatch):
+    """The vector lives in its passage's own row (docs/concepts/10-vector-store.md).
+    Passages go in out of pid order and with gaps in the ids, which a matrix paired with
+    the table by position could not survive, and the dense channel must still score and
+    return the passage whose vector matched. A real DuckDB file; no Ollama."""
+    import pickle
+
+    import duckdb
+    import numpy as np
+    from rank_bm25 import BM25Okapi
+
+    import config
+    import engine.retrieve as retrieve
+
+    def unit(axis):
+        v = np.zeros(config.EMBED_DIM, dtype=np.float32)
+        v[axis] = 1.0
+        return v
+
+    db = tmp_path / "corpus.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(f"""
+        CREATE TABLE passages (
+            pid INTEGER PRIMARY KEY, kind TEXT, season INTEGER, ref TEXT, article TEXT,
+            title TEXT, text TEXT, effective_from TEXT, effective_to TEXT, url TEXT,
+            published TEXT, embedding FLOAT[{config.EMBED_DIM}]
+        )
+    """)
+    for pid, axis in [(42, 2), (7, 0), (19, 1)]:
+        con.execute("INSERT INTO passages VALUES (?, 'sporting', 2026, ?, ?, 't', 'x', "
+                    "NULL, NULL, NULL, NULL, ?)", [pid, f"Doc {pid}", str(pid), unit(axis).tolist()])
+    con.close()
+    bm25 = tmp_path / "bm25.pkl"
+    bm25.write_bytes(pickle.dumps(BM25Okapi([["x"], ["x"], ["x"]])))
+
+    monkeypatch.setattr(config, "DB", db)
+    monkeypatch.setattr(retrieve, "BM25_PKL", bm25)
+    monkeypatch.setattr(retrieve, "embed_query", lambda text: unit(1))
+
+    r = retrieve.Retriever()
+    assert [h.pid for h in r.dense_only("anything", k=1)] == [19]
+    scores = r._dense(list(range(len(r.rows))), "anything")
+    assert dict(zip((row[0] for row in r.rows), scores.tolist())) == {7: 0.0, 19: 1.0, 42: 0.0}

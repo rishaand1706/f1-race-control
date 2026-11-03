@@ -22,19 +22,22 @@ import duckdb
 import numpy as np
 
 import config
-from corpus.build_index import VECTORS, BM25_PKL, tokenize
+from corpus.build_index import BM25_PKL, tokenize
 from engine.embed import embed_query
 
 
 def load():
-    if not VECTORS.exists():
+    if not config.DB.exists():
         raise SystemExit("No index. Run: python -m corpus.build_index")
     con = duckdb.connect(str(config.DB), read_only=True)
-    rows = con.execute(
-        "SELECT pid, kind, season, ref, article, title, text FROM passages ORDER BY pid"
+    # Rows and vectors come out of one query, so row i and vector i are the same passage.
+    got = con.execute(
+        "SELECT pid, kind, season, ref, article, title, text, embedding FROM passages ORDER BY pid"
     ).fetchall()
     con.close()
-    return rows, np.load(VECTORS), pickle.loads(BM25_PKL.read_bytes())
+    rows = [r[:-1] for r in got]
+    vectors = np.array([r[-1] for r in got], dtype=np.float32)
+    return rows, vectors, pickle.loads(BM25_PKL.read_bytes())
 
 
 def search(query: str, k: int = 5, kind: str | None = None, season: int | None = None):

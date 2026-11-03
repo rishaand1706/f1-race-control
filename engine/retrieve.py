@@ -35,7 +35,7 @@ import duckdb
 import numpy as np
 
 import config
-from corpus.build_index import VECTORS, BM25_PKL, tokenize
+from corpus.build_index import BM25_PKL, tokenize
 from engine.embed import embed_query
 from engine.query import Query
 
@@ -66,24 +66,49 @@ class Hit:
 
 
 class Retriever:
-    """Holds the index in memory. Built once, queried per event.
+    """Holds the passage rows and BM25 in memory and a read-only connection to the vector
+    store. Built once, queried per event.
 
-    Loading is ~30MB and a few hundred milliseconds; doing it per query would blow the
-    latency budget on its own, which is why this is a class and not a function.
+    Loading takes a few hundred milliseconds; doing it per query would blow the latency
+    budget on its own, which is why this is a class and not a function. The vectors stay
+    in DuckDB and are scored there (docs/concepts/10-vector-store.md).
     """
 
     def __init__(self) -> None:
-        if not VECTORS.exists():
+        if not config.DB.exists():
             raise SystemExit("No index. Run: python -m corpus.build_index")
-        con = duckdb.connect(str(config.DB), read_only=True)
-        self.rows = con.execute("""
+        self.con = duckdb.connect(str(config.DB), read_only=True)
+        columns = {c[0] for c in self.con.execute("DESCRIBE passages").fetchall()}
+        if "embedding" not in columns:
+            raise SystemExit("Index predates the DuckDB vector store. "
+                             "Run: python -m corpus.build_index")
+        self.rows = self.con.execute("""
             SELECT pid, kind, season, ref, article, title, text,
                    effective_from, effective_to, url, published
             FROM passages ORDER BY pid
         """).fetchall()
-        con.close()
-        self.vectors = np.load(VECTORS)
+        self.at = {row[0]: i for i, row in enumerate(self.rows)}
         self.bm25 = pickle.loads(BM25_PKL.read_bytes())
+
+    def _dense(self, cand: list[int], text: str) -> np.ndarray:
+        """Cosine similarity of `text` to each candidate, computed inside DuckDB.
+
+        Scores come back keyed by pid, so a score can only belong to the passage whose
+        vector produced it. The vectors are unit length (engine/embed.py), so the inner
+        product is the cosine. One cursor per call: the server runs searches on worker
+        threads, and a DuckDB connection must not be shared across threads.
+        """
+        pids = [self.rows[i][0] for i in cand]
+        cur = self.con.cursor()
+        try:
+            scores = dict(cur.execute(f"""
+                SELECT pid, array_inner_product(embedding, ?::FLOAT[{config.EMBED_DIM}])
+                FROM passages
+                WHERE pid IN (SELECT unnest(?::INTEGER[]))
+            """, [embed_query(text).tolist(), pids]).fetchall())
+        finally:
+            cur.close()
+        return np.array([scores[p] for p in pids], dtype=np.float32)
 
     # --- filtering ----------------------------------------------------------
 
@@ -125,7 +150,7 @@ class Retriever:
         if not cand:
             return []
 
-        dense = self.vectors[cand] @ embed_query(text)
+        dense = self._dense(cand, text)
         lexical = np.asarray(self.bm25.get_scores(tokenize(terms)))[cand]
 
         # Fuse deeper than we return: a passage ranked 1st on one channel and 30th on the
@@ -172,16 +197,27 @@ class Retriever:
         }
 
     def dense_only(self, text: str, k: int = 3, kind: str | None = None) -> list[Hit]:
-        """No fusion, no filter. Kept so the failure stays reproducible."""
-        cand = [i for i, r in enumerate(self.rows) if kind is None or r[1] == kind]
-        scores = self.vectors[cand] @ embed_query(text)
-        return [
-            Hit(pid=self.rows[cand[j]][0], kind=self.rows[cand[j]][1],
-                ref=self.rows[cand[j]][3], article=self.rows[cand[j]][4],
-                title=self.rows[cand[j]][5], text=self.rows[cand[j]][6],
-                url=self.rows[cand[j]][9], score=float(scores[j]))
-            for j in np.argsort(-scores)[:k]
-        ]
+        """No fusion, no filter. Kept so the failure stays reproducible.
+
+        Also the plainest form of a vector query: one statement, top k by cosine.
+        """
+        where, args = ("WHERE kind = ?", [kind]) if kind else ("", [])
+        cur = self.con.cursor()
+        try:
+            top = cur.execute(f"""
+                SELECT pid, array_inner_product(embedding, ?::FLOAT[{config.EMBED_DIM}]) AS score
+                FROM passages {where}
+                ORDER BY score DESC
+                LIMIT ?
+            """, [embed_query(text).tolist(), *args, k]).fetchall()
+        finally:
+            cur.close()
+        hits = []
+        for pid, score in top:
+            row = self.rows[self.at[pid]]
+            hits.append(Hit(pid=row[0], kind=row[1], ref=row[3], article=row[4],
+                            title=row[5], text=row[6], url=row[9], score=float(score)))
+        return hits
 
 
 # --- the staged failures ----------------------------------------------------
