@@ -93,22 +93,20 @@ passage is counted as unsupported, whatever marker sits next to it.
 ## What happened
 
 Measured with `python -m eval.agent_check` on the same 120 decisions as
-`engine.retrieve --check`. The naive run covers all 120. The guarded run stopped at 101 of
-the 120 (interrupted, not filtered), so its column is over those 101, with the pipeline's
-hit@5 recomputed on the same 101 rows.
+`engine.retrieve --check`, both variants over all 120.
 
-| | naive (120) | guarded (101) |
+| | naive | guarded |
 |---|---|---|
 | answered after a rule search | 0% | 100% |
-| ...only because the retry guard fired | - | 38.6% |
-| rule hit@5, the agent's own search | 0% | 69.3% |
-| rule hit@5, the pipeline on the same rows | 64.2% | 65.3% |
+| ...only because the retry guard fired | - | 39.2% |
+| rule hit@5, the agent's own search | 0% | 70.0% |
+| rule hit@5, the pipeline on the same rows | 64.2% | 64.2% |
 | rule searches against the wrong rulebook | - | 0% |
 | cards with a citation marker pointing at nothing | 100% | 0% |
 | cards naming an article never retrieved | 63.3% | 0% |
 | tool-call cap reached | 0% | 0% |
-| card time, median | 5.3 s | 11.0 s |
-| model calls per card, mean | 1.00 | 2.39 |
+| card time, median | 5.3 s | 11.3 s |
+| model calls per card, mean | 1.00 | 2.40 |
 
 Against the predictions:
 
@@ -119,13 +117,13 @@ Against the predictions:
 - **The wrong-rulebook and leak predictions could not be tested on the naive agent**,
   because it never called a tool. In the guarded agent they are ruled out by construction
   (rule 1), and the counters agree: no wrong-rulebook search, no leaked ruling.
-- **The paraphrase prediction was wrong.** On the same 101 rows the agent's own queries
-  found the cited article in the top 5 for 69.3%, against 65.3% for the pipeline. That is
-  four decisions, on rows that are not held out, so it is not a win; what it does rule out
-  is the large loss the prediction expected.
-- **The retry guard earns its place**: 39 of the 101 cards searched only because it fired.
+- **The paraphrase prediction was wrong.** The agent's own queries found the cited article
+  in the top 5 for 70.0%, against 64.2% for the pipeline. That is seven decisions, on rows
+  that are not held out, so it is not a win; what it does rule out is the large loss the
+  prediction expected.
+- **The retry guard earns its place**: 47 of the 120 cards searched only because it fired.
 
-The cost is the loop: 2.39 model calls per card and an 11 s median, 97% of it inside the
+The cost is the loop: 2.40 model calls per card and an 11.3 s median, 96% of it inside the
 model according to the OpenTelemetry spans. And one gap the guards do not close: the agent
-almost never asks for precedents (2 of 101 cards), so the slot the pipeline always fills is
+almost never asks for precedents (1 of 120 cards), so the slot the pipeline always fills is
 usually empty. That is a prompt and tool-design problem, not a safety one, and it is open.

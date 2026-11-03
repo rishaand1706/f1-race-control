@@ -168,8 +168,8 @@ decisions and named an article it had never been shown in **63%** of them. Four 
 now run in code rather than in the prompt: the tools set the season, rulebook and
 published-before filters themselves, a run that never searched gets one retry, citations
 bind only to passages this run retrieved, and the tool loop is capped. Each guard has a
-test that fails when the guard is removed. With them, all 101 cards of the guarded run
-searched and none named an unretrieved article; spans from OpenTelemetry show where each card's time goes. Full
+test that fails when the guard is removed. With them, all 120 cards searched and none
+named an unretrieved article; spans from OpenTelemetry show where each card's time goes. Full
 numbers and what they do not show are in
 [`docs/concepts/09-agents-and-guardrails.md`](docs/concepts/09-agents-and-guardrails.md).
 
