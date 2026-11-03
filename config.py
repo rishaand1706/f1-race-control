@@ -93,3 +93,9 @@ OLLAMA_KEEP_ALIVE = "30m"
 # Race seconds after which an incident is too old to be worth the model's time. See
 # server/scheduler.py and the simulation behind it.
 PROSE_MAX_AGE = 120.0
+
+# --- Agent (docs/concepts/09) -------------------------------------------------
+# The card model again, because it is the one with tool calling and no reasoning phase.
+# qwen3:4b also calls tools, but spent 713 tokens and 32s deliberating before its first
+# call, against 31 tokens and 5.6s here (one request each, same prompt and tool).
+AGENT_MODEL = CARD_MODEL

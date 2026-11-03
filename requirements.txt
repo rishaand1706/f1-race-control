@@ -18,3 +18,7 @@ uvicorn>=0.27
 
 # Generation + embeddings run locally via Ollama over HTTP.
 # No SDK needed: httpx covers it. No API key, no paid service.
+
+# Agent (docs/concepts/09): the same card, with the model choosing its own searches
+semantic-kernel[ollama]>=1.46   # tested on 1.46.0
+opentelemetry-sdk>=1.30         # spans: model time vs tool time per card
